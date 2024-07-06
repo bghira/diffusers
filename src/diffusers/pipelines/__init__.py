@@ -242,6 +242,7 @@ else:
             "StableDiffusionLDM3DPipeline",
         ]
     )
+    _import_structure["aura_flow"] = ["AuraFlowPipeline"]
     _import_structure["stable_diffusion_3"] = ["StableDiffusion3Pipeline", "StableDiffusion3Img2ImgPipeline"]
     _import_structure["stable_diffusion_attend_and_excite"] = ["StableDiffusionAttendAndExcitePipeline"]
     _import_structure["stable_diffusion_safe"] = ["StableDiffusionPipelineSafe"]
@@ -406,6 +407,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
             AudioLDM2ProjectionModel,
             AudioLDM2UNet2DConditionModel,
         )
+        from .aura_flow import AuraFlowPipeline
         from .blip_diffusion import BlipDiffusionPipeline
         from .controlnet import (
             BlipDiffusionControlNetPipeline,

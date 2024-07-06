@@ -76,6 +76,7 @@ else:
     _import_structure["models"].extend(
         [
             "AsymmetricAutoencoderKL",
+            "AuraFlowTransformer2DModel",
             "AutoencoderKL",
             "AutoencoderKLTemporalDecoder",
             "AutoencoderTiny",
@@ -232,6 +233,7 @@ else:
             "AudioLDM2ProjectionModel",
             "AudioLDM2UNet2DConditionModel",
             "AudioLDMPipeline",
+            "AuraFlowPipeline",
             "BlipDiffusionControlNetPipeline",
             "BlipDiffusionPipeline",
             "CLIPImageProjection",
@@ -497,6 +499,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
     else:
         from .models import (
             AsymmetricAutoencoderKL,
+            AuraFlowTransformer2DModel,
             AutoencoderKL,
             AutoencoderKLTemporalDecoder,
             AutoencoderTiny,
@@ -633,6 +636,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
             AudioLDM2ProjectionModel,
             AudioLDM2UNet2DConditionModel,
             AudioLDMPipeline,
+            AuraFlowPipeline,
             CLIPImageProjection,
             CycleDiffusionPipeline,
             HunyuanDiTControlNetPipeline,
