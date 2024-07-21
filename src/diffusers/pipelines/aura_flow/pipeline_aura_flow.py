@@ -12,9 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import inspect
-from typing import Callable, List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
-import numpy as np
 import torch
 from transformers import T5Tokenizer, UMT5EncoderModel
 
@@ -24,11 +23,27 @@ from ...models.attention_processor import AttnProcessor2_0, FusedAttnProcessor2_
 from ...schedulers import FlowMatchEulerDiscreteScheduler
 from ...utils import logging
 from ...loaders.lora import SD3LoraLoaderMixin
+from ...utils import logging, replace_example_docstring
 from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline, ImagePipelineOutput
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
+
+EXAMPLE_DOC_STRING = """
+    Examples:
+        ```py
+        >>> import torch
+        >>> from diffusers import AuraFlowPipeline
+
+        >>> pipe = AuraFlowPipeline.from_pretrained("fal/AuraFlow", torch_dtype=torch.float16)
+        >>> pipe = pipe.to("cuda")
+        >>> prompt = "A cat holding a sign that says hello world"
+        >>> image = pipe(prompt).images[0]
+        >>> image.save("aura_flow.png")
+        ```
+"""
 
 
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
@@ -92,6 +107,23 @@ def retrieve_timesteps(
 
 
 class AuraFlowPipeline(DiffusionPipeline, SD3LoraLoaderMixin):
+    r"""
+    Args:
+        tokenizer (`T5TokenizerFast`):
+            Tokenizer of class
+            [T5Tokenizer](https://huggingface.co/docs/transformers/model_doc/t5#transformers.T5Tokenizer).
+        text_encoder ([`T5EncoderModel`]):
+            Frozen text-encoder. AuraFlow uses
+            [T5](https://huggingface.co/docs/transformers/model_doc/t5#transformers.T5EncoderModel), specifically the
+            [EleutherAI/pile-t5-xl](https://huggingface.co/EleutherAI/pile-t5-xl) variant.
+        vae ([`AutoencoderKL`]):
+            Variational Auto-Encoder (VAE) Model to encode and decode images to and from latent representations.
+        transformer ([`AuraFlowTransformer2DModel`]):
+            Conditional Transformer (MMDiT and DiT) architecture to denoise the encoded image latents.
+        scheduler ([`FlowMatchEulerDiscreteScheduler`]):
+            A scheduler to be used in combination with `transformer` to denoise the encoded image latents.
+    """
+
     _optional_components = ["tokenizer", "text_encoder"]
     model_cpu_offload_seq = "text_encoder->transformer->vae"
 
@@ -109,17 +141,17 @@ class AuraFlowPipeline(DiffusionPipeline, SD3LoraLoaderMixin):
             tokenizer=tokenizer, text_encoder=text_encoder, vae=vae, transformer=transformer, scheduler=scheduler
         )
 
-        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
+        self.vae_scale_factor = (
+            2 ** (len(self.vae.config.block_out_channels) - 1) if hasattr(self, "vae") and self.vae is not None else 8
+        )
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
 
-    # Copied from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha.PixArtAlphaPipeline.check_inputs
     def check_inputs(
         self,
         prompt,
         height,
         width,
         negative_prompt,
-        callback_steps,
         prompt_embeds=None,
         negative_prompt_embeds=None,
         prompt_attention_mask=None,
@@ -127,14 +159,6 @@ class AuraFlowPipeline(DiffusionPipeline, SD3LoraLoaderMixin):
     ):
         if height % 8 != 0 or width % 8 != 0:
             raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
-
-        if (callback_steps is None) or (
-            callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0)
-        ):
-            raise ValueError(
-                f"`callback_steps` has to be a positive integer but is {callback_steps} of type"
-                f" {type(callback_steps)}."
-            )
 
         if prompt is not None and prompt_embeds is not None:
             raise ValueError(
@@ -183,8 +207,8 @@ class AuraFlowPipeline(DiffusionPipeline, SD3LoraLoaderMixin):
     def encode_prompt(
         self,
         prompt: Union[str, List[str]],
+        negative_prompt: Union[str, List[str]] = None,
         do_classifier_free_guidance: bool = True,
-        negative_prompt: str = "This is watermark, jpeg image white background, web image",
         num_images_per_prompt: int = 1,
         device: Optional[torch.device] = None,
         prompt_embeds: Optional[torch.Tensor] = None,
@@ -213,6 +237,10 @@ class AuraFlowPipeline(DiffusionPipeline, SD3LoraLoaderMixin):
                 provided, text embeddings will be generated from `prompt` input argument.
             negative_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative text embeddings.
+            prompt_attention_mask (`torch.Tensor`, *optional*):
+                Pre-generated attention mask for text embeddings.
+            negative_prompt_attention_mask (`torch.Tensor`, *optional*):
+                Pre-generated attention mask for negative text embeddings.
             max_sequence_length (`int`, defaults to 256): Maximum sequence length to use for the prompt.
         """
         if device is None:
@@ -269,6 +297,7 @@ class AuraFlowPipeline(DiffusionPipeline, SD3LoraLoaderMixin):
 
         # get unconditional embeddings for classifier free guidance
         if do_classifier_free_guidance and negative_prompt_embeds is None:
+            negative_prompt = negative_prompt or ""
             uncond_tokens = [negative_prompt] * batch_size if isinstance(negative_prompt, str) else negative_prompt
             max_length = prompt_embeds.shape[1]
             uncond_input = self.tokenizer(
@@ -354,29 +383,93 @@ class AuraFlowPipeline(DiffusionPipeline, SD3LoraLoaderMixin):
             self.vae.decoder.mid_block.to(dtype)
 
     @torch.no_grad()
+    @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
         self,
         prompt: Union[str, List[str]] = None,
-        negative_prompt: str = "This is watermark, jpeg image white background, web image",
+        negative_prompt: Union[str, List[str]] = None,
         num_inference_steps: int = 50,
         timesteps: List[int] = None,
         sigmas: List[float] = None,
         guidance_scale: float = 3.5,
         num_images_per_prompt: Optional[int] = 1,
-        height: Optional[int] = 512,
-        width: Optional[int] = 512,
+        height: Optional[int] = 1024,
+        width: Optional[int] = 1024,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         latents: Optional[torch.Tensor] = None,
         prompt_embeds: Optional[torch.Tensor] = None,
         prompt_attention_mask: Optional[torch.Tensor] = None,
         negative_prompt_embeds: Optional[torch.Tensor] = None,
         negative_prompt_attention_mask: Optional[torch.Tensor] = None,
+        max_sequence_length: int = 256,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
-        callback: Optional[Callable[[int, int, torch.Tensor], None]] = None,
-        callback_steps: int = 1,
-        max_sequence_length: int = 256,
     ) -> Union[ImagePipelineOutput, Tuple]:
+        r"""
+        Function invoked when calling the pipeline for generation.
+
+        Args:
+            prompt (`str` or `List[str]`, *optional*):
+                The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`.
+                instead.
+            negative_prompt (`str` or `List[str]`, *optional*):
+                The prompt or prompts not to guide the image generation. If not defined, one has to pass
+                `negative_prompt_embeds` instead. Ignored when not using guidance (i.e., ignored if `guidance_scale` is
+                less than `1`).
+            height (`int`, *optional*, defaults to self.transformer.config.sample_size * self.vae_scale_factor):
+                The height in pixels of the generated image. This is set to 1024 by default for best results.
+            width (`int`, *optional*, defaults to self.transformer.config.sample_size * self.vae_scale_factor):
+                The width in pixels of the generated image. This is set to 1024 by default for best results.
+            num_inference_steps (`int`, *optional*, defaults to 50):
+                The number of denoising steps. More denoising steps usually lead to a higher quality image at the
+                expense of slower inference.
+            sigmas (`List[float]`, *optional*):
+                Custom sigmas used to override the timestep spacing strategy of the scheduler. If `sigmas` is passed,
+                `num_inference_steps` and `timesteps` must be `None`.
+            timesteps (`List[int]`, *optional*):
+                Custom timesteps to use for the denoising process with schedulers which support a `timesteps` argument
+                in their `set_timesteps` method. If not defined, the default behavior when `num_inference_steps` is
+                passed will be used. Must be in descending order.
+            guidance_scale (`float`, *optional*, defaults to 5.0):
+                Guidance scale as defined in [Classifier-Free Diffusion Guidance](https://arxiv.org/abs/2207.12598).
+                `guidance_scale` is defined as `w` of equation 2. of [Imagen
+                Paper](https://arxiv.org/pdf/2205.11487.pdf). Guidance scale is enabled by setting `guidance_scale >
+                1`. Higher guidance scale encourages to generate images that are closely linked to the text `prompt`,
+                usually at the expense of lower image quality.
+            num_images_per_prompt (`int`, *optional*, defaults to 1):
+                The number of images to generate per prompt.
+            generator (`torch.Generator` or `List[torch.Generator]`, *optional*):
+                One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
+                to make generation deterministic.
+            latents (`torch.FloatTensor`, *optional*):
+                Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
+                generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
+                tensor will ge generated by sampling using the supplied random `generator`.
+            prompt_embeds (`torch.FloatTensor`, *optional*):
+                Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
+                provided, text embeddings will be generated from `prompt` input argument.
+            prompt_attention_mask (`torch.Tensor`, *optional*):
+                Pre-generated attention mask for text embeddings.
+            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+                Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
+                weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
+                argument.
+            negative_prompt_attention_mask (`torch.Tensor`, *optional*):
+                Pre-generated attention mask for negative text embeddings.
+            output_type (`str`, *optional*, defaults to `"pil"`):
+                The output format of the generate image. Choose between
+                [PIL](https://pillow.readthedocs.io/en/stable/): `PIL.Image.Image` or `np.array`.
+            return_dict (`bool`, *optional*, defaults to `True`):
+                Whether or not to return a [`~pipelines.stable_diffusion_xl.StableDiffusionXLPipelineOutput`] instead
+                of a plain tuple.
+            max_sequence_length (`int` defaults to 256): Maximum sequence length to use with the `prompt`.
+
+        Examples:
+
+        Returns: [`~pipelines.ImagePipelineOutput`] or `tuple`:
+            If `return_dict` is `True`, [`~pipelines.ImagePipelineOutput`] is returned, otherwise a `tuple` is returned
+            where the first element is a list with the generated images.
+        """
         # 1. Check inputs. Raise error if not correct
         height = height or self.transformer.config.sample_size * self.vae_scale_factor
         width = width or self.transformer.config.sample_size * self.vae_scale_factor
@@ -386,7 +479,6 @@ class AuraFlowPipeline(DiffusionPipeline, SD3LoraLoaderMixin):
             height,
             width,
             negative_prompt,
-            callback_steps,
             prompt_embeds,
             negative_prompt_embeds,
             prompt_attention_mask,
@@ -415,9 +507,9 @@ class AuraFlowPipeline(DiffusionPipeline, SD3LoraLoaderMixin):
             negative_prompt_embeds,
             negative_prompt_attention_mask,
         ) = self.encode_prompt(
-            prompt,
-            do_classifier_free_guidance,
+            prompt=prompt,
             negative_prompt=negative_prompt,
+            do_classifier_free_guidance=do_classifier_free_guidance,
             num_images_per_prompt=num_images_per_prompt,
             device=device,
             prompt_embeds=prompt_embeds,
@@ -430,8 +522,6 @@ class AuraFlowPipeline(DiffusionPipeline, SD3LoraLoaderMixin):
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
 
         # 4. Prepare timesteps
-
-        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
         timesteps, num_inference_steps = retrieve_timesteps(
             self.scheduler, num_inference_steps, device, timesteps, sigmas
         )
@@ -455,12 +545,11 @@ class AuraFlowPipeline(DiffusionPipeline, SD3LoraLoaderMixin):
             for i, t in enumerate(timesteps):
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+
+                # aura use timestep value between 0 and 1, with t=1 as noise and t=0 as the image
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-                timestep = (
-                    torch.tensor([t / 1000])
-                    .expand(latent_model_input.shape[0])
-                    .to(latents.device, dtype=latents.dtype)
-                )
+                timestep = torch.tensor([t / 1000]).expand(latent_model_input.shape[0])
+                timestep = timestep.to(latents.device, dtype=latents.dtype)
 
                 # predict noise model_output
                 noise_pred = self.transformer(
@@ -481,9 +570,6 @@ class AuraFlowPipeline(DiffusionPipeline, SD3LoraLoaderMixin):
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
-                    if callback is not None and i % callback_steps == 0:
-                        step_idx = i // getattr(self.scheduler, "order", 1)
-                        callback(step_idx, t, latents)
 
         if output_type == "latent":
             image = latents

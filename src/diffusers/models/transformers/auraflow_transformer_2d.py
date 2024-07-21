@@ -101,9 +101,23 @@ class AuraFlowFeedForward(nn.Module):
         return x
 
 
+class AuraFlowPreFinalBlock(nn.Module):
+    def __init__(self, embedding_dim: int, conditioning_embedding_dim: int):
+        super().__init__()
+
+        self.silu = nn.SiLU()
+        self.linear = nn.Linear(conditioning_embedding_dim, embedding_dim * 2, bias=False)
+
+    def forward(self, x: torch.Tensor, conditioning_embedding: torch.Tensor) -> torch.Tensor:
+        emb = self.linear(self.silu(conditioning_embedding).to(x.dtype))
+        scale, shift = torch.chunk(emb, 2, dim=1)
+        x = x * (1 + scale)[:, None, :] + shift[:, None, :]
+        return x
+
+
 @maybe_allow_in_graph
-class AuraFlowDiTTransformerBlock(nn.Module):
-    """Similar `AuraFlowTransformerBlock with a single DiT instead of an MMDiT."""
+class AuraFlowSingleTransformerBlock(nn.Module):
+    """Similar to `AuraFlowJointTransformerBlock` with a single DiT instead of an MMDiT."""
 
     def __init__(self, dim, num_attention_heads, attention_head_dim):
         super().__init__()
@@ -146,7 +160,7 @@ class AuraFlowDiTTransformerBlock(nn.Module):
 
 
 @maybe_allow_in_graph
-class AuraFlowTransformerBlock(nn.Module):
+class AuraFlowJointTransformerBlock(nn.Module):
     r"""
     Transformer block for Aura Flow. Similar to SD3 MMDiT. Differences (non-exhaustive):
 
@@ -161,21 +175,11 @@ class AuraFlowTransformerBlock(nn.Module):
         is_last (`bool`): Boolean to determine if this is the last block in the model.
     """
 
-    def __init__(self, dim, num_attention_heads, attention_head_dim, context_norm_type="ada_norm_zero"):
+    def __init__(self, dim, num_attention_heads, attention_head_dim):
         super().__init__()
 
         self.norm1 = AdaLayerNormZero(dim, bias=False, norm_type="fp32_layer_norm")
-
-        if context_norm_type == "ada_norm_continous":
-            self.norm1_context = AdaLayerNormContinuous(
-                dim, dim, elementwise_affine=False, bias=False, norm_type="fp32_layer_norm"
-            )
-        elif context_norm_type == "ada_norm_zero":
-            self.norm1_context = AdaLayerNormZero(dim, bias=False, norm_type="fp32_layer_norm")
-        else:
-            raise ValueError(
-                "Invalid norm type provided for `context_norm_type`. Valid values are are: 'ada_norm_continous' and 'ada_norm_zero'."
-            )
+        self.norm1_context = AdaLayerNormZero(dim, bias=False, norm_type="fp32_layer_norm")
 
         processor = AuraFlowAttnProcessor2_0()
         self.attn = Attention(
@@ -231,6 +235,26 @@ class AuraFlowTransformerBlock(nn.Module):
 
 
 class AuraFlowTransformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMixin):
+    r"""
+    A 2D Transformer model as introduced in AuraFlow (https://blog.fal.ai/auraflow/).
+
+    Parameters:
+        sample_size (`int`): The width of the latent images. This is fixed during training since
+            it is used to learn a number of position embeddings.
+        patch_size (`int`): Patch size to turn the input data into small patches.
+        in_channels (`int`, *optional*, defaults to 16): The number of channels in the input.
+        num_mmdit_layers (`int`, *optional*, defaults to 4): The number of layers of MMDiT Transformer blocks to use.
+        num_single_dit_layers (`int`, *optional*, defaults to 4):
+            The number of layers of Transformer blocks to use. These blocks use concatenated image and text
+            representations.
+        attention_head_dim (`int`, *optional*, defaults to 64): The number of channels in each head.
+        num_attention_heads (`int`, *optional*, defaults to 18): The number of heads to use for multi-head attention.
+        joint_attention_dim (`int`, *optional*): The number of `encoder_hidden_states` dimensions to use.
+        caption_projection_dim (`int`): Number of dimensions to use when projecting the `encoder_hidden_states`.
+        out_channels (`int`, defaults to 16): Number of output channels.
+        pos_embed_max_size (`int`, defaults to 4096): Maximum positions to embed from the image latents.
+    """
+
     _supports_gradient_checkpointing = True
 
     @register_to_config
@@ -270,7 +294,7 @@ class AuraFlowTransformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, From
 
         self.joint_transformer_blocks = nn.ModuleList(
             [
-                AuraFlowTransformerBlock(
+                AuraFlowJointTransformerBlock(
                     dim=self.inner_dim,
                     num_attention_heads=self.config.num_attention_heads,
                     attention_head_dim=self.config.attention_head_dim,
@@ -280,7 +304,7 @@ class AuraFlowTransformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, From
         )
         self.single_transformer_blocks = nn.ModuleList(
             [
-                AuraFlowDiTTransformerBlock(
+                AuraFlowSingleTransformerBlock(
                     dim=self.inner_dim,
                     num_attention_heads=self.config.num_attention_heads,
                     attention_head_dim=self.config.attention_head_dim,
@@ -289,7 +313,7 @@ class AuraFlowTransformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, From
             ]
         )
 
-        self.norm_out = AdaLayerNormContinuous(self.inner_dim, self.inner_dim, norm_type="no_norm", bias=False)
+        self.norm_out = AuraFlowPreFinalBlock(self.inner_dim, self.inner_dim)
         self.proj_out = nn.Linear(self.inner_dim, patch_size * patch_size * self.out_channels, bias=False)
 
         # https://arxiv.org/abs/2309.16588

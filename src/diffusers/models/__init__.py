@@ -42,6 +42,8 @@ if is_torch_available():
     _import_structure["transformers.dit_transformer_2d"] = ["DiTTransformer2DModel"]
     _import_structure["transformers.dual_transformer_2d"] = ["DualTransformer2DModel"]
     _import_structure["transformers.hunyuan_transformer_2d"] = ["HunyuanDiT2DModel"]
+    _import_structure["transformers.latte_transformer_3d"] = ["LatteTransformer3DModel"]
+    _import_structure["transformers.lumina_nextdit2d"] = ["LuminaNextDiT2DModel"]
     _import_structure["transformers.pixart_transformer_2d"] = ["PixArtTransformer2DModel"]
     _import_structure["transformers.prior_transformer"] = ["PriorTransformer"]
     _import_structure["transformers.t5_film_transformer"] = ["T5FilmDecoder"]
@@ -87,6 +89,8 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
             DiTTransformer2DModel,
             DualTransformer2DModel,
             HunyuanDiT2DModel,
+            LatteTransformer3DModel,
+            LuminaNextDiT2DModel,
             PixArtTransformer2DModel,
             PriorTransformer,
             SD3Transformer2DModel,
