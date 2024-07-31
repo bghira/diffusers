@@ -22,7 +22,7 @@ from ...models import AuraFlowTransformer2DModel, AutoencoderKL
 from ...models.attention_processor import AttnProcessor2_0, FusedAttnProcessor2_0, XFormersAttnProcessor
 from ...schedulers import FlowMatchEulerDiscreteScheduler
 from ...utils import logging
-from ...loaders.lora import SD3LoraLoaderMixin
+from ...loaders import SD3LoraLoaderMixin
 from ...utils import logging, replace_example_docstring
 from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline, ImagePipelineOutput
