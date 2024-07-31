@@ -26,6 +26,7 @@ from ..attention_processor import (
     AttentionProcessor,
     AttnAddedKVProcessor,
     AttnProcessor,
+    FusedAttnProcessor2_0,
 )
 from ..modeling_outputs import AutoencoderKLOutput
 from ..modeling_utils import ModelMixin
@@ -63,8 +64,8 @@ class AutoencoderKL(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             can be fine-tuned / trained to a lower range without loosing too much precision in which case
             `force_upcast` can be set to `False` - see: https://huggingface.co/madebyollin/sdxl-vae-fp16-fix
         mid_block_add_attention (`bool`, *optional*, default to `True`):
-            If enabled, the mid_block of the Encoder and Decoder will have attention blocks. If set to false, the mid_block
-            will only have resnet blocks
+            If enabled, the mid_block of the Encoder and Decoder will have attention blocks. If set to false, the
+            mid_block will only have resnet blocks
     """
 
     _supports_gradient_checkpointing = True
@@ -491,6 +492,8 @@ class AutoencoderKL(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         for module in self.modules():
             if isinstance(module, Attention):
                 module.fuse_projections(fuse=True)
+
+        self.set_attn_processor(FusedAttnProcessor2_0())
 
     # Copied from diffusers.models.unets.unet_2d_condition.UNet2DConditionModel.unfuse_qkv_projections
     def unfuse_qkv_projections(self):
