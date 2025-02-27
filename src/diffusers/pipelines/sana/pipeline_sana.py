@@ -16,10 +16,11 @@ import html
 import inspect
 import re
 import urllib.parse as ul
+import warnings
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import Gemma2PreTrainedModel, GemmaTokenizer, GemmaTokenizerFast
 
 from ...callbacks import MultiPipelineCallbacks, PipelineCallback
 from ...image_processor import PixArtImageProcessor
@@ -199,8 +200,8 @@ class SanaPipeline(DiffusionPipeline, SanaLoraLoaderMixin):
 
     def __init__(
         self,
-        tokenizer: AutoTokenizer,
-        text_encoder: AutoModelForCausalLM,
+        tokenizer: Union[GemmaTokenizer, GemmaTokenizerFast],
+        text_encoder: Gemma2PreTrainedModel,
         vae: AutoencoderDC,
         transformer: SanaTransformer2DModel,
         scheduler: DPMSolverMultistepScheduler,
@@ -311,7 +312,8 @@ class SanaPipeline(DiffusionPipeline, SanaLoraLoaderMixin):
         else:
             batch_size = prompt_embeds.shape[0]
 
-        self.tokenizer.padding_side = "right"
+        if getattr(self, "tokenizer", None) is not None:
+            self.tokenizer.padding_side = "right"
 
         # See Section 3.1. of the paper.
         max_length = max_sequence_length
@@ -953,7 +955,14 @@ class SanaPipeline(DiffusionPipeline, SanaLoraLoaderMixin):
             image = latents
         else:
             latents = latents.to(self.vae.dtype)
-            image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
+            try:
+                image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
+            except torch.cuda.OutOfMemoryError as e:
+                warnings.warn(
+                    f"{e}. \n"
+                    f"Try to use VAE tiling for large images. For example: \n"
+                    f"pipe.vae.enable_tiling(tile_sample_min_width=512, tile_sample_min_height=512)"
+                )
             if use_resolution_binning:
                 image = self.image_processor.resize_and_crop_tensor(image, orig_width, orig_height)
 
