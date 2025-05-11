@@ -521,47 +521,57 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self._num_timesteps = len(timesteps)
 
+        # 7. Denoising loop with batched CFG
+        is_cfg = guidance_scale > 1.0
+        # Pre-concatenate embeddings if using CFG
+        if is_cfg:
+            # duplicate embeddings once per batch
+            neg_embeds = negative_prompt_embeds.to(transformer_dtype)
+            pos_embeds = prompt_embeds.to(transformer_dtype)
+            # combined batch: [uncond, cond]
+            cat_embeds = torch.cat([neg_embeds, pos_embeds], dim=0)
+        
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
 
                 self._current_timestep = t
+                # model input
                 latent_model_input = latents.to(transformer_dtype)
-                timestep = t.expand(latents.shape[0])
+                if is_cfg:
+                    # duplicate latents for uncond+cond in one batch
+                    latent_model_input = torch.cat([latent_model_input, latent_model_input], dim=0)
+                    encoder_states = cat_embeds
+                else:
+                    encoder_states = prompt_embeds.to(transformer_dtype)
 
-                noise_pred = self.transformer(
+                timestep = t.expand(latent_model_input.shape[0])
+                # single pass through transformer
+                noise_preds = self.transformer(
                     hidden_states=latent_model_input,
                     timestep=timestep,
-                    encoder_hidden_states=prompt_embeds,
+                    encoder_hidden_states=encoder_states,
                     attention_kwargs=attention_kwargs,
                     return_dict=False,
                 )[0]
 
-                if self.do_classifier_free_guidance:
-                    noise_uncond = self.transformer(
-                        hidden_states=latent_model_input,
-                        timestep=timestep,
-                        encoder_hidden_states=negative_prompt_embeds,
-                        attention_kwargs=attention_kwargs,
-                        return_dict=False,
-                    )[0]
-                    noise_pred = noise_uncond + guidance_scale * (noise_pred - noise_uncond)
+                # split and combine guidance if needed
+                if is_cfg:
+                    noise_uncond, noise_cond = noise_preds.chunk(2, dim=0)
+                    noise_pred = noise_uncond + guidance_scale * (noise_cond - noise_uncond)
+                else:
+                    noise_pred = noise_preds
 
-                # compute the previous noisy sample x_t -> x_t-1
+                # compute previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
 
                 if callback_on_step_end is not None:
-                    callback_kwargs = {}
-                    for k in callback_on_step_end_tensor_inputs:
-                        callback_kwargs[k] = locals()[k]
-                    callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
+                    callback_kwargs = {k: locals()[k] for k in callback_on_step_end_tensor_inputs}
+                    cb_out = callback_on_step_end(self, i, t, callback_kwargs)
+                    latents = cb_out.get("latents", latents)
 
-                    latents = callback_outputs.pop("latents", latents)
-                    prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                    negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
-
-                # call the callback, if provided
+                # progress
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
 
